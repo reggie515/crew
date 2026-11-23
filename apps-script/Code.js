@@ -77,7 +77,7 @@ function dailyJob() {
 /* ───────────────────────── HTTP 入口 ───────────────────────── */
 
 function doGet() {
-  return json_({ ok: true, msg: '工班調度 API 運作中' });
+  return json_({ ok: true, msg: '工班調度 API 運作中', version: 'v2' });
 }
 
 function doPost(e) {
