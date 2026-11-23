@@ -102,20 +102,38 @@ var ACTIONS = {
 };
 
 function handle_(p) {
+  var t0 = Date.now();
+  _cache = {};
   try {
     var user = verify_(p.idToken);
     var fn = ACTIONS[p.action];
     if (!fn) fail_('未知的操作：' + p.action);
-    return withLock_(function () {
-      promoteFar_();
-      var ctx = ctx_(user);
-      if (p.action !== 'init' && p.action !== 'bind' && !ctx.me) fail_('請先選擇你的主任身分', 'UNBOUND');
-      var msg = fn(p, ctx);
-      return { ok: true, msg: msg || '', data: state_(ctx_(user)) };
-    });
+    var out;
+    if (p.action === 'init') {
+      // 讀取不需要排隊上鎖；只有遠期登記剛好要轉正時才上鎖寫入
+      if (hasDueFar_()) withLock_(function () { _cache = {}; promoteFar_(); });
+      _cache = {};
+      out = { ok: true, msg: '', data: state_(ctx_(user)) };
+    } else {
+      out = withLock_(function () {
+        _cache = {};  // 上鎖後重新讀取，確保衝突檢查用的是最新資料
+        promoteFar_();
+        var ctx = ctx_(user);
+        if (p.action !== 'bind' && !ctx.me) fail_('請先選擇你的主任身分', 'UNBOUND');
+        var msg = fn(p, ctx);
+        return { ok: true, msg: msg || '', data: state_(ctx_(user)) };
+      });
+    }
+    out.ms = Date.now() - t0;
+    return out;
   } catch (err) {
-    return { ok: false, error: err.message || String(err), code: err.code || '' };
+    return { ok: false, error: err.message || String(err), code: err.code || '', ms: Date.now() - t0 };
   }
+}
+
+function hasDueFar_() {
+  var last = lastDay_();
+  return table_('遠期登記').rows.some(function (r) { return r.狀態 === '等待中' && r.日期 <= last; });
 }
 
 function withLock_(fn) {
@@ -238,7 +256,7 @@ function A_release(p, ctx) {
   var t = table_('預約');
   var row = mustFind_(t.rows, p.id);
   assertCanModify_(row, ctx);
-  t.sh.deleteRow(row._row);
+  deleteRow_(t, row);
   log_(ctx.me.name, '釋出', row.ID, desc_(row));
   return '已釋出，這個時段現在是空的';
 }
@@ -313,7 +331,7 @@ function state_(ctx) {
   var today = today_();
   var from = addDays_(today, -7);
   var chiefRows = table_('主任').rows.filter(function (r) { return isOn_(r.啟用); });
-  var logs = table_('紀錄').rows.slice(-50).reverse();
+  var logs = recentLogs_(50);
   return {
     user: { name: ctx.user.name },
     me: ctx.me ? { name: ctx.me.name, isAdmin: ctx.isAdmin } : null,
@@ -395,7 +413,11 @@ function assertCanModify_(row, ctx) {
 
 /* ───────────────────────── 工具 ───────────────────────── */
 
+// 同一次請求內，同一張工作表只讀一次（寫入時自動作廢）
+var _cache = {};
+
 function table_(name) {
+  if (_cache[name]) return _cache[name];
   var sh = SpreadsheetApp.getActive().getSheetByName(name);
   if (!sh) fail_('找不到工作表「' + name + '」，請先執行 setup');
   var values = sh.getDataRange().getValues();
@@ -409,7 +431,27 @@ function table_(name) {
     headers.forEach(function (h, j) { o[h] = norm_(r[j], h); });
     rows.push(o);
   }
-  return { sh: sh, headers: headers, rows: rows };
+  _cache[name] = { name: name, sh: sh, headers: headers, rows: rows };
+  return _cache[name];
+}
+
+/** 只讀「紀錄」最後 n 筆，避免紀錄越來越多時拖慢速度 */
+function recentLogs_(n) {
+  var sh = SpreadsheetApp.getActive().getSheetByName('紀錄');
+  var last = sh.getLastRow();
+  if (last < 2) return [];
+  var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(function (h) { return String(h).trim(); });
+  var start = Math.max(2, last - n + 1);
+  return sh.getRange(start, 1, last - start + 1, headers.length).getValues().map(function (r) {
+    var o = {};
+    headers.forEach(function (h, j) { o[h] = norm_(r[j], h); });
+    return o;
+  }).filter(function (o) { return o.時間 || o.內容; }).reverse();
+}
+
+function deleteRow_(t, row) {
+  t.sh.deleteRow(row._row);
+  delete _cache[t.name];
 }
 
 function norm_(v, h) {
@@ -420,6 +462,7 @@ function norm_(v, h) {
 
 function append_(t, obj) {
   t.sh.appendRow(t.headers.map(function (h) { return obj[h] !== undefined ? obj[h] : ''; }));
+  delete _cache[t.name];
 }
 
 function update_(t, row, change) {
@@ -428,6 +471,7 @@ function update_(t, row, change) {
     t.headers.map(function (h) { return merged[h] !== undefined ? merged[h] : ''; })
   ]);
   Object.keys(change).forEach(function (k) { row[k] = change[k]; });
+  delete _cache[t.name];
 }
 
 function merge_(a, b) {

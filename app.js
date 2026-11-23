@@ -11,6 +11,24 @@
   var S = null;          // 伺服器回傳的狀態
   var lastSync = null;
   var busy = false;
+  var syncing = false;   // 正在向伺服器抓資料
+  var stale = false;     // 目前畫面是上次存下來的舊資料
+  var CACHE_KEY = 'crew-state-v1';
+  var liffReadyResolve;
+  var liffReady = new Promise(function (r) { liffReadyResolve = r; });
+
+  function saveCache() {
+    if (DEMO) return;
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), S: S })); } catch (e) { }
+  }
+  function loadCache() {
+    if (DEMO) return null;
+    try {
+      var c = JSON.parse(localStorage.getItem(CACHE_KEY));
+      if (c && c.S && c.S.me && Date.now() - c.t < 3 * 864e5) return c.S;
+    } catch (e) { }
+    return null;
+  }
   var demoUser = null;
   var ui = { tab: 'grid', showPast: false, modal: null, chart: { who: '', days: 7 } };
 
@@ -60,9 +78,16 @@
     return DEMO ? window.DemoBackend.token(demoUser) : window.liff.getIDToken();
   }
 
+  function ss(k, v) {
+    try { if (v === undefined) return sessionStorage.getItem(k); if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) { }
+    return null;
+  }
+
   async function api(action, data, quiet) {
     if (busy && quiet) return;
     busy = true;
+    syncing = true;
+    await liffReady;  // LINE 還沒準備好前先等，避免畫面先顯示舊資料時被點擊而出錯
     var payload = Object.assign({ action: action, idToken: idToken() }, data || {});
     var res;
     try {
@@ -70,24 +95,38 @@
         await sleep(120);
         res = window.DemoBackend.call(payload);
       } else {
-        var r = await fetch(CFG.API_URL, { method: 'POST', body: JSON.stringify(payload) });
-        res = await r.json();
+        var ctrl = new AbortController();
+        var timer = setTimeout(function () { ctrl.abort(); }, 30000);
+        try {
+          var r = await fetch(CFG.API_URL, { method: 'POST', body: JSON.stringify(payload), signal: ctrl.signal });
+          res = await r.json();
+        } finally { clearTimeout(timer); }
       }
     } catch (e) {
-      busy = false;
-      if (!quiet) toast('連線失敗，請檢查網路後再試一次', true);
-      throw e;
+      busy = false; syncing = false;
+      var msg = e && e.name === 'AbortError' ? '伺服器超過 30 秒沒有回應，請稍後再試' : '連線失敗，請檢查網路後再試一次';
+      if (!quiet) toast(msg, true);
+      if (S) render();
+      throw new Error(msg);
     }
-    busy = false;
+    busy = false; syncing = false;
+    if (res.ms) console.log('[crew] ' + action + ' 伺服器處理 ' + res.ms + 'ms');
     if (!res.ok) {
-      if (res.code === 'AUTH' && !DEMO) {
+      // LINE 登入過期：自動重新登入一次；同一個分頁只試一次，避免無限循環卡住
+      if (res.code === 'AUTH' && !DEMO && !ss('crew-auth-retry')) {
+        ss('crew-auth-retry', '1');
         window.liff.logout();
         window.liff.login({ redirectUri: location.href });
+        return new Promise(function () { });
       }
       if (!quiet) toast(res.error, true);
+      if (S) render();
       throw new Error(res.error);
     }
+    ss('crew-auth-retry', null);
     S = res.data;
+    stale = false;
+    saveCache();
     lastSync = new Date();
     if (res.msg && !quiet) toast(res.msg);
     if (!ui.chart.who && S.masters.length) ui.chart.who = S.masters[0];
@@ -105,7 +144,8 @@
     var html = '<header class="top">' + demoBar() +
       '<div class="top-row"><h1>工班調度</h1>' +
       '<span class="me">' + esc(S.me.name) + (S.me.isAdmin ? ' <span class="badge">管理員</span>' : '') + '</span>' +
-      '<button class="icon-btn" data-act="refresh" title="重新整理">↻ ' + (lastSync ? pad(lastSync.getHours()) + ':' + pad(lastSync.getMinutes()) : '') + '</button></div>' +
+      '<button class="icon-btn" data-act="refresh" title="重新整理">' +
+      (syncing || stale ? '⏳ 更新中' : '↻ ' + (lastSync ? pad(lastSync.getHours()) + ':' + pad(lastSync.getMinutes()) : '')) + '</button></div>' +
       '<nav class="tabs">' + tabs.map(function (t) {
         return '<button data-act="tab" data-tab="' + t[0] + '" class="' + (ui.tab === t[0] ? 'on' : '') + '">' + t[1] + '</button>';
       }).join('') + '</nav></header>';
@@ -568,21 +608,45 @@
     });
   }
 
+  function withTimeout(p, ms, msg) {
+    return Promise.race([p, new Promise(function (_, bad) { setTimeout(function () { bad(new Error(msg)); }, ms); })]);
+  }
+
+  function setLoading(step, text) {
+    if (S) return;  // 已經顯示舊資料，就不蓋掉畫面
+    $app.innerHTML = '<div class="loading">' + esc(text) + '<br><small style="color:#94a3b8">步驟 ' + step + ' / 3</small></div>';
+  }
+
   async function boot() {
+    var step = '準備';
     try {
       if (DEMO) {
         await loadScript('mock-gas.js');
         await loadScript('apps-script/Code.js');
         window.DemoBackend.ensure();
         demoUser = window.DemoBackend.users[0];
+        liffReadyResolve();
       } else {
-        await loadScript('https://static.line-scdn.net/liff/edge/2/sdk.js');
-        await window.liff.init({ liffId: CFG.LIFF_ID });
+        // 先顯示上次的排班，背景再抓最新資料
+        var cached = loadCache();
+        if (cached) { S = cached; stale = true; render(); }
+        step = '載入 LINE 元件';
+        setLoading(1, '載入 LINE 元件中…');
+        await withTimeout(loadScript('https://static.line-scdn.net/liff/edge/2/sdk.js'), 20000, '載入 LINE 元件逾時，請檢查網路');
+        step = 'LINE 登入';
+        setLoading(2, '確認 LINE 登入中…');
+        await withTimeout(window.liff.init({ liffId: CFG.LIFF_ID }), 20000, 'LINE 初始化逾時');
         if (!window.liff.isLoggedIn()) { window.liff.login({ redirectUri: location.href }); return; }
+        liffReadyResolve();
+        step = '讀取排班';
+        setLoading(3, '讀取排班資料中…');
       }
-      await api('init');
+      await api('init', {}, !!S);
     } catch (e) {
-      $app.innerHTML = '<div class="empty">⚠️ 無法啟動：' + esc(e.message || e) + '<br><br><button class="btn" onclick="location.reload()">重新載入</button></div>';
+      if (S) { stale = false; render(); toast('⚠️ ' + step + '失敗：' + (e.message || e) + '（目前顯示的是上次的資料）', true); return; }
+      $app.innerHTML = '<div class="empty">⚠️ 卡在「' + esc(step) + '」這一步<br>' + esc(e.message || e) +
+        '<br><br><button class="btn" onclick="location.reload()">重新載入</button>' +
+        '<p style="font-size:12px;margin-top:16px">一直出現的話，請截圖這個畫面給管理員</p></div>';
     }
   }
   boot();
