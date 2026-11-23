@@ -54,7 +54,8 @@
     return i < 0 ? '#64748b' : COLORS[i % COLORS.length];
   }
   function overlap(a, b) { return a === '全天' || b === '全天' || a === b; }
-  function canModify(b) { return S.me && (S.me.isAdmin || (b.chief === S.me.name && b.date >= S.today)); }
+  function readOnly() { return !!(S && S.me && S.me.readOnly); }
+  function canModify(b) { return S.me && !S.me.readOnly && (S.me.isAdmin || (b.chief === S.me.name && b.date >= S.today)); }
   function byId(id) { return S.bookings.find(function (b) { return b.id === id; }); }
   function cellBookings(date, master) {
     return S.bookings.filter(function (b) { return b.date === date && b.master === master; });
@@ -179,9 +180,14 @@
     if (!S) { $app.innerHTML = '<div class="loading">載入中…</div>'; return; }
     if (!S.me) { $app.innerHTML = demoBar() + bindView(); return; }
     var tabs = [['grid', '排班表'], ['mine', '我的預約'], ['far', '遠期登記'], ['log', '變更紀錄']];
+    if (readOnly()) {
+      tabs = tabs.filter(function (t) { return t[0] !== 'mine'; });
+      if (ui.tab === 'mine') ui.tab = 'grid';
+    }
     var html = '<header class="top">' + demoBar() +
       '<div class="top-row"><h1>工班調度</h1>' +
-      '<span class="me">' + esc(S.me.name) + (S.me.isAdmin ? ' <span class="badge">管理員</span>' : '') + '</span>' +
+      '<span class="me">' + esc(S.me.name) + (S.me.isAdmin ? ' <span class="badge">管理員</span>' : '') +
+      (readOnly() ? ' <span class="badge" style="background:#cbd5e1">👀 唯讀</span>' : '') + '</span>' +
       '<button class="icon-btn" data-act="refresh" title="重新整理">' +
       (syncing || stale ? '⏳ 更新中' : '↻ ' + (lastSync ? pad(lastSync.getHours()) + ':' + pad(lastSync.getMinutes()) : '')) + '</button></div>' +
       '<nav class="tabs">' + tabs.map(function (t) {
@@ -242,7 +248,7 @@
 
   function cellHtml(d, m) {
     var bs = cellBookings(d, m);
-    var past = d < S.today;
+    var past = d < S.today || readOnly();  // 唯讀身分：空格不顯示「＋」
     var full = bs.find(function (b) { return b.slot === '全天'; });
     if (full) return cardHtml(full, false);
     if (!bs.length) return past ? '' : '<button class="add" data-act="new" data-date="' + d + '" data-master="' + esc(m) + '" aria-label="預約">＋</button>';
@@ -288,7 +294,7 @@
   function farItem(f) {
     var cls = { '等待中': 'st-wait', '已轉正': 'st-ok', '衝突': 'st-bad', '已取消': 'st-off' }[f.status] || 'st-off';
     var rank = f.status === '等待中' ? farRank(f) : 0;
-    var canCancel = (S.me.isAdmin || f.chief === S.me.name) && (f.status === '等待中' || f.status === '衝突');
+    var canCancel = !readOnly() && (S.me.isAdmin || f.chief === S.me.name) && (f.status === '等待中' || f.status === '衝突');
     return '<div class="item" style="--c:' + color(f.chief) + '"><div class="main">' +
       '<div class="t">' + mdw(f.date) + ' ' + esc(f.master) + ' · ' + f.slot + '</div>' +
       '<div class="sub">' + esc(f.site) + '（' + esc(f.chief) + '）' + (f.note ? '｜' + esc(f.note) : '') + '</div>' +
@@ -304,7 +310,7 @@
     });
     return '<div class="section"><div class="hint">' + mdw(S.lastDay) + ' 以後的日期還不能直接預約，請先在這裡登記。<br>' +
       '同一天同一位師傅，<b>先登記的人優先</b>。日期進入 ' + S.days + ' 天內時，系統會自動轉成正式預約；如果那格已經被人佔走，會標示「衝突」，由管理員協調。</div>' +
-      '<button class="btn" style="width:100%;margin-bottom:14px" data-act="far-new">＋ 新增遠期登記</button>' +
+      (readOnly() ? '' : '<button class="btn" style="width:100%;margin-bottom:14px" data-act="far-new">＋ 新增遠期登記</button>') +
       (list.length ? list.map(farItem).join('') : '<div class="empty">目前沒有遠期登記</div>') + '</div><div style="height:70px"></div>';
   }
 
@@ -406,7 +412,7 @@
         '<button class="btn sec" data-act="transfer" data-id="' + b.id + '">轉讓</button>' +
         '<button class="btn danger" data-act="release" data-id="' + b.id + '">釋出</button></div>' +
         '<div class="tip">私下協調好換班後，用「轉讓」把這格直接改給對方；不需要這天的師傅了就按「釋出」。</div>';
-    } else {
+    } else if (!readOnly()) {
       h += '<div class="tip">需要這個時段，請私下和 <b>' + esc(b.chief) + '</b> 協調。談好之後，請 ' + esc(b.chief) + ' 打開這格按「轉讓」改給你，系統會留下紀錄。</div>';
     }
     h += '<div class="actions"><button class="btn sec" data-act="close">關閉</button></div>';

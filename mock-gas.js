@@ -105,7 +105,8 @@
     { id: 'u2', name: '宇晉', chief: '宇晉' },
     { id: 'u3', name: '祺翊', chief: '祺翊' },
     { id: 'u4', name: '振宏', chief: '振宏' },
-    { id: 'u5', name: '奕賢', chief: null }
+    { id: 'u5', name: '奕賢', chief: null },
+    { id: 'u6', name: '老闆（示範）', chief: '老闆（示範）' }
   ];
 
   function token(u) { return 'mock:' + u.id + ':' + u.name; }
@@ -121,9 +122,11 @@
      ['新莊廠房', '祺翊', '新北市新莊區', '是'], ['內湖辦公室裝修', '振宏', '台北市內湖區', '是'],
      ['林口社區大樓', '奕賢', '新北市林口區', '是']].forEach(function (r) { sites.appendRow(r); });
 
-    USERS.forEach(function (u) { if (u.chief) window.handle_({ action: 'bind', idToken: token(u), chief: u.chief }); });
     var chiefs = ss.getSheetByName('主任');
+    chiefs.appendRow(['老闆（示範）', '主任', '是', '', '', '']);
+    USERS.forEach(function (u) { if (u.chief) window.handle_({ action: 'bind', idToken: token(u), chief: u.chief }); });
     chiefs.getRange(2, 2).setValues([['管理員']]);
+    chiefs.getRange(7, 2).setValues([['老闆']]);
 
     var today = window.today_();
     var d = function (n) { return window.addDays_(today, n); };

@@ -22,6 +22,9 @@ var SCHEMA = {
 // 這些工作表整張設成純文字，避免日期 / ID 被試算表自動轉格式
 var TEXT_SHEETS = ['主任', '預約', '遠期登記', '紀錄'];
 
+// 「主任」分頁的角色欄填這些值 = 唯讀瀏覽者：不能做任何修改，名字也不會出現在網頁上
+var VIEW_ROLES = ['老闆', '唯讀'];
+
 var SEED_MASTERS = ['阿得', '阿佑', '小安'];
 var SEED_CHIEFS = ['其駿', '宇晉', '祺翊', '振宏', '奕賢'];
 
@@ -77,7 +80,7 @@ function dailyJob() {
 /* ───────────────────────── HTTP 入口 ───────────────────────── */
 
 function doGet() {
-  return json_({ ok: true, msg: '工班調度 API 運作中', version: 'v2' });
+  return json_({ ok: true, msg: '工班調度 API 運作中', version: 'v3' });
 }
 
 function doPost(e) {
@@ -120,6 +123,7 @@ function handle_(p) {
         promoteFar_();
         var ctx = ctx_(user);
         if (p.action !== 'bind' && !ctx.me) fail_('請先選擇你的主任身分', 'UNBOUND');
+        if (ctx.isViewer) fail_('你是唯讀身分，只能瀏覽，不能修改');
         var msg = fn(p, ctx);
         return { ok: true, msg: msg || '', data: state_(ctx_(user)) };
       });
@@ -181,8 +185,19 @@ function ctx_(user) {
   return {
     user: user,
     me: me ? { name: me.名稱 } : null,
-    isAdmin: !!(me && me.角色 === '管理員')
+    isAdmin: !!(me && me.角色 === '管理員'),
+    isViewer: !!(me && isViewerRow_(me))
   };
+}
+
+function isViewerRow_(r) {
+  return VIEW_ROLES.indexOf(String(r.角色).trim()) >= 0;
+}
+
+/** 可以被預約、轉讓、代填的主任名單（排除停用與唯讀瀏覽者） */
+function chiefNames_() {
+  return table_('主任').rows.filter(function (r) { return isOn_(r.啟用) && r.名稱 && !isViewerRow_(r); })
+    .map(function (r) { return r.名稱; });
 }
 
 /* ───────────────────────── 操作 ───────────────────────── */
@@ -191,7 +206,7 @@ function A_bind(p, ctx) {
   if (ctx.me) fail_('你已經綁定為「' + ctx.me.name + '」');
   var t = table_('主任');
   var row = find_(t.rows, function (r) { return r.名稱 === p.chief && isOn_(r.啟用); });
-  if (!row) fail_('找不到主任「' + p.chief + '」');
+  if (!row || isViewerRow_(row)) fail_('找不到主任「' + p.chief + '」');
   if (row.LINE_USER_ID) fail_('「' + row.名稱 + '」已經被其他 LINE 帳號綁定，請聯絡管理員');
   update_(t, row, { LINE_USER_ID: ctx.user.id, LINE名稱: ctx.user.name, 綁定時間: now_() });
   log_(row.名稱, '綁定身分', '', 'LINE 名稱：' + ctx.user.name);
@@ -236,7 +251,7 @@ function A_transfer(p, ctx) {
   var row = mustFind_(t.rows, p.id);
   assertCanModify_(row, ctx);
   var to = String(p.toChief || '').trim();
-  if (activeNames_('主任').indexOf(to) < 0) fail_('找不到主任「' + to + '」');
+  if (chiefNames_().indexOf(to) < 0) fail_('找不到主任「' + to + '」');
   if (to === row.主任) fail_('這筆預約本來就是 ' + to + ' 的');
   var site = String(p.site || '').trim().slice(0, 60) || row.工地;
   var change = {
@@ -330,11 +345,13 @@ function promoteFar_() {
 function state_(ctx) {
   var today = today_();
   var from = addDays_(today, -7);
-  var chiefRows = table_('主任').rows.filter(function (r) { return isOn_(r.啟用); });
-  var logs = recentLogs_(50);
+  var allChiefs = table_('主任').rows;
+  var chiefRows = allChiefs.filter(function (r) { return isOn_(r.啟用) && !isViewerRow_(r); });
+  var hidden = allChiefs.filter(isViewerRow_).map(function (r) { return r.名稱; });
+  var logs = recentLogs_(50).filter(function (l) { return hidden.indexOf(l.操作者) < 0; });
   return {
     user: { name: ctx.user.name },
-    me: ctx.me ? { name: ctx.me.name, isAdmin: ctx.isAdmin } : null,
+    me: ctx.me ? { name: ctx.me.name, isAdmin: ctx.isAdmin, readOnly: ctx.isViewer } : null,
     today: today,
     days: openDays_(),
     lastDay: lastDay_(),
@@ -381,7 +398,7 @@ function buildBooking_(p, ctx, base) {
   if (SLOTS.indexOf(slot) < 0) fail_('時段只能是 全天／上午／下午');
   var chief = base ? base.主任 : ctx.me.name;
   if (ctx.isAdmin && p.chief) chief = String(p.chief).trim();
-  if (activeNames_('主任').indexOf(chief) < 0) fail_('找不到主任「' + chief + '」');
+  if (chiefNames_().indexOf(chief) < 0) fail_('找不到主任「' + chief + '」');
   var site = pick('site', '工地').slice(0, 60);
   if (!site) fail_('請選擇或填寫工地');
   var note = (p.note !== undefined && p.note !== null ? String(p.note) : (base ? base.備註 : '')).trim().slice(0, 200);
