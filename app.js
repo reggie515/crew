@@ -3,7 +3,7 @@
 
   var CFG = window.APP_CONFIG || {};
   var QS = new URLSearchParams(location.search);
-  var DEMO = QS.has('demo') || !CFG.API_URL;
+  var DEMO = QS.has('demo') || !CFG.API_URL || !CFG.LIFF_ID;
   var COLORS = ['#2563eb', '#d97706', '#059669', '#db2777', '#7c3aed', '#0891b2', '#65a30d'];
   var WD = '日一二三四五六';
   var SLOTS = ['全天', '上午', '下午'];
