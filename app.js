@@ -83,6 +83,40 @@
     return null;
   }
 
+  function postOnce(payload, ms) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, ms);
+    var promise = fetch(CFG.API_URL, { method: 'POST', body: JSON.stringify(payload), signal: ctrl.signal })
+      .then(function (r) { return r.json(); })
+      .finally(function () { clearTimeout(timer); });
+    return { promise: promise, abort: function () { ctrl.abort(); } };
+  }
+
+  /** 依 delays 錯開送出多個相同請求，第一個成功的就採用，其餘取消 */
+  function postHedged(payload, delays, ms) {
+    return new Promise(function (resolve, reject) {
+      var done = false, failed = 0, tries = [], timers = [];
+      function finish() { done = true; timers.forEach(clearTimeout); }
+      delays.forEach(function (d, i) {
+        timers.push(setTimeout(function () {
+          if (done) return;
+          if (i > 0) console.log('[crew] 伺服器 ' + d / 1000 + ' 秒未回應，自動重送第 ' + i + ' 次');
+          var t = postOnce(payload, ms);
+          tries.push(t);
+          t.promise.then(function (res) {
+            if (done) return;
+            finish();
+            tries.forEach(function (x) { if (x !== t) x.abort(); });
+            resolve(res);
+          }, function (err) {
+            failed++;
+            if (!done && failed === delays.length) { finish(); reject(err); }
+          });
+        }, d));
+      });
+    });
+  }
+
   async function api(action, data, quiet) {
     if (busy && quiet) return;
     busy = true;
@@ -94,17 +128,21 @@
       if (DEMO) {
         await sleep(120);
         res = window.DemoBackend.call(payload);
+      } else if (action === 'init') {
+        // 讀取：Google 偶爾會不回應，3.5 秒沒回就再送一次，誰先回來用誰；背景自動更新只送一次
+        res = quiet && S ? await postOnce(payload, 12000).promise : await postHedged(payload, [0, 3500, 8000], 30000);
       } else {
-        var ctrl = new AbortController();
-        var timer = setTimeout(function () { ctrl.abort(); }, 30000);
-        try {
-          var r = await fetch(CFG.API_URL, { method: 'POST', body: JSON.stringify(payload), signal: ctrl.signal });
-          res = await r.json();
-        } finally { clearTimeout(timer); }
+        // 寫入：不自動重送，避免重複；逾時後重新整理讓使用者確認結果
+        res = await postOnce(payload, 30000).promise;
       }
     } catch (e) {
       busy = false; syncing = false;
-      var msg = e && e.name === 'AbortError' ? '伺服器超過 30 秒沒有回應，請稍後再試' : '連線失敗，請檢查網路後再試一次';
+      var timeout = e && e.name === 'AbortError';
+      var msg = timeout ? '伺服器回應太慢，請稍後再試' : '連線失敗，請檢查網路後再試一次';
+      if (timeout && action !== 'init') {
+        msg = '伺服器回應太慢，不確定是否成功，已重新整理，請看排班表確認';
+        setTimeout(function () { refresh(true); }, 300);
+      }
       if (!quiet) toast(msg, true);
       if (S) render();
       throw new Error(msg);
